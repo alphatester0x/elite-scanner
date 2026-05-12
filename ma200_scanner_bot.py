@@ -552,6 +552,6 @@ except Exception as e:
 
     print(e)
 
-    send_telegram(f"❌ Bot Error
-
-{e}")
+    send_telegram(
+        f"❌ Bot Error\n{e}"
+    )

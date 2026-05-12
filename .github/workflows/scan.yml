@@ -1,4 +1,4 @@
-name: MA200 Scanner
+name: Elite Scanner
 
 on:
   # schedule:
@@ -24,4 +24,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-        run: python ma200_scanner_bot.py
+        run: python elite_scanner_bot.py

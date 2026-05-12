@@ -1,11 +1,3 @@
-# ============================================================
-#  MULTI MODE CRYPTO SIGNAL BOT
-#  Modes:
-#   - SWING
-#   - ELITE
-#   - SCALP
-# ============================================================
-
 import requests
 import time
 import os
@@ -17,10 +9,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # ============================================================
 
-MODE = "ELITE"   # SWING | ELITE | SCALP
+MODE_FILE = "mode.json"
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 MAX_WORKERS = 30
 MAX_SIGNALS_PER_SCAN = 10
@@ -30,9 +22,31 @@ BINANCE_BASE = "https://data-api.binance.vision"
 SESSION = requests.Session()
 
 # ============================================================
-# INDICATORS
+# MODE STORAGE
 # ============================================================
 
+def load_mode():
+
+    if not os.path.exists(MODE_FILE):
+        save_mode("ELITE")
+
+    try:
+        with open(MODE_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("mode", "ELITE")
+
+    except:
+        return "ELITE"
+
+
+def save_mode(mode):
+
+    with open(MODE_FILE, "w") as f:
+        json.dump({"mode": mode}, f)
+
+# ============================================================
+# INDICATORS
+# ============================================================
 
 def sma(c, n):
     return sum(c[-n:]) / n if len(c) >= n else None
@@ -43,6 +57,7 @@ def sma_p(c, n):
 
 
 def ema(c, n):
+
     if len(c) < n:
         return None
 
@@ -56,15 +71,19 @@ def ema(c, n):
 
 
 def rsi(c, n=14):
+
     if len(c) < n + 2:
         return None
 
-    d = [c[i+1]-c[i] for i in range(len(c)-1)]
+    d = [c[i + 1] - c[i] for i in range(len(c) - 1)]
 
     ag = sum(x for x in d[-n:] if x > 0) / n
     al = sum(-x for x in d[-n:] if x < 0) / n
 
-    return 100 if al == 0 else 100 - 100/(1+ag/al)
+    if al == 0:
+        return 100
+
+    return 100 - 100 / (1 + ag / al)
 
 
 def atr(highs, lows, closes, n=14):
@@ -78,8 +97,8 @@ def atr(highs, lows, closes, n=14):
 
         tr = max(
             highs[i] - lows[i],
-            abs(highs[i] - closes[i-1]),
-            abs(lows[i] - closes[i-1])
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
         )
 
         trs.append(tr)
@@ -98,16 +117,16 @@ def adx(highs, lows, closes, n=14):
 
     for i in range(1, len(closes)):
 
-        up_move = highs[i] - highs[i-1]
-        down_move = lows[i-1] - lows[i]
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
 
         plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
         minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
 
         tr = max(
             highs[i] - lows[i],
-            abs(highs[i] - closes[i-1]),
-            abs(lows[i] - closes[i-1])
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
         )
 
         trs.append(tr)
@@ -131,7 +150,6 @@ def adx(highs, lows, closes, n=14):
 # TELEGRAM
 # ============================================================
 
-
 def send_telegram(message):
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -147,10 +165,65 @@ def send_telegram(message):
     except Exception as e:
         print(e)
 
+
+LAST_UPDATE_ID = None
+
+
+def handle_telegram_commands():
+
+    global LAST_UPDATE_ID
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+
+    try:
+
+        params = {"timeout": 5}
+
+        if LAST_UPDATE_ID:
+            params["offset"] = LAST_UPDATE_ID + 1
+
+        resp = SESSION.get(url, params=params, timeout=10)
+
+        data = resp.json()
+
+        if not data.get("ok"):
+            return
+
+        for upd in data["result"]:
+
+            LAST_UPDATE_ID = upd["update_id"]
+
+            msg = upd.get("message", {})
+
+            text = msg.get("text", "").lower()
+
+            chat_id = str(msg.get("chat", {}).get("id"))
+
+            if chat_id != str(TELEGRAM_CHAT_ID):
+                continue
+
+            if text == "/elite":
+                save_mode("ELITE")
+                send_telegram("🔥 Mode diubah ke ELITE")
+
+            elif text == "/swing":
+                save_mode("SWING")
+                send_telegram("✅ Mode diubah ke SWING")
+
+            elif text == "/scalp":
+                save_mode("SCALP")
+                send_telegram("⚡ Mode diubah ke SCALP")
+
+            elif text == "/status":
+                mode = load_mode()
+                send_telegram(f"📊 Current mode: <b>{mode}</b>")
+
+    except Exception as e:
+        print(f"Telegram command error: {e}")
+
 # ============================================================
 # BINANCE
 # ============================================================
-
 
 def get_pairs():
 
@@ -195,44 +268,20 @@ def fetch(symbol, interval):
             [float(c[5]) for c in raw],
         )
 
-    except Exception:
+    except:
         return None
 
 # ============================================================
-# BTC FILTER
+# SCAN SYMBOL
 # ============================================================
-
-
-def btc_market_bullish():
-
-    data = fetch("BTCUSDT", "1d")
-
-    if data is None:
-        return True
-
-    opens, highs, lows, closes, vols = data
-
-    ma200 = sma(closes, 200)
-    e50 = ema(closes, 50)
-    e200 = ema(closes, 200)
-
-    if not ma200 or not e50 or not e200:
-        return True
-
-    cc = closes[-1]
-
-    return cc > ma200 and e50 > e200
-
-# ============================================================
-# SCAN LOGIC
-# ============================================================
-
 
 def scan_symbol(symbol):
 
+    mode = load_mode()
+
     signals = []
 
-    if MODE == "SCALP":
+    if mode == "SCALP":
         timeframes = [("15m", "15M"), ("1h", "1H")]
     else:
         timeframes = [("4h", "4H"), ("1d", "1D")]
@@ -254,7 +303,11 @@ def scan_symbol(symbol):
         body = (cc - co) / co * 100
 
         avg_v = sum(vols[-21:-1]) / 20
-        vol_r = vols[-1] / avg_v if avg_v > 0 else 0
+
+        if avg_v == 0:
+            continue
+
+        vol_r = vols[-1] / avg_v
 
         rsic = rsi(closes)
 
@@ -271,7 +324,7 @@ def scan_symbol(symbol):
         # ELITE MODE
         # ====================================================
 
-        if MODE == "ELITE":
+        if mode == "ELITE":
 
             ma200 = sma(closes, 200)
             ma200p = sma_p(closes, 200)
@@ -279,7 +332,7 @@ def scan_symbol(symbol):
             e50 = ema(closes, 50)
             e200 = ema(closes, 200)
 
-            if not ma200 or not e50 or not e200:
+            if not ma200 or not ma200p:
                 continue
 
             ma_slope = ma200 - sma(closes[-20:-1], 20)
@@ -300,7 +353,7 @@ def scan_symbol(symbol):
             if body < 1.5:
                 continue
 
-            if rsic > 72:
+            if rsic and rsic > 72:
                 continue
 
             if atr_pct < 3:
@@ -311,9 +364,8 @@ def scan_symbol(symbol):
                 signals.append(
                     (
                         symbol,
-                        "ELITE_BREAKOUT",
                         tf,
-                        f"🔥 ELITE SIGNAL\n"
+                        f"🔥 <b>ELITE SIGNAL</b>\n\n"
                         f"ADX: {adxv:.1f}\n"
                         f"VOL: {vol_r:.1f}x\n"
                         f"RSI: {rsic:.1f}\n"
@@ -322,17 +374,16 @@ def scan_symbol(symbol):
                 )
 
         # ====================================================
-        # WINRATE MODE
+        # SWING MODE
         # ====================================================
 
-        elif MODE == "SWING":
+        elif mode == "SWING":
 
             ma200 = sma(closes, 200)
-
             e50 = ema(closes, 50)
             e200 = ema(closes, 200)
 
-            if not ma200 or not e50 or not e200:
+            if not ma200:
                 continue
 
             if not (e50 > e200 and cc > ma200):
@@ -348,15 +399,14 @@ def scan_symbol(symbol):
             if lower_wick < 1:
                 continue
 
-            if rsic < 40 or rsic > 65:
+            if rsic and (rsic < 40 or rsic > 65):
                 continue
 
             signals.append(
                 (
                     symbol,
-                    "WINRATE_PULLBACK",
                     tf,
-                    f"✅ WINRATE SIGNAL\n"
+                    f"✅ <b>SWING SIGNAL</b>\n\n"
                     f"RSI: {rsic:.1f}\n"
                     f"Wick: {lower_wick:.1f}%"
                 )
@@ -366,7 +416,7 @@ def scan_symbol(symbol):
         # SCALP MODE
         # ====================================================
 
-        elif MODE == "SCALP":
+        elif mode == "SCALP":
 
             e9 = ema(closes, 9)
             e21 = ema(closes, 21)
@@ -377,10 +427,7 @@ def scan_symbol(symbol):
             if not e9 or not e21 or not pe9 or not pe21:
                 continue
 
-            cross_up = (
-                e9 > e21 and
-                pe9 < pe21
-            )
+            cross_up = e9 > e21 and pe9 < pe21
 
             if not cross_up:
                 continue
@@ -394,15 +441,14 @@ def scan_symbol(symbol):
             if atr_pct < 1:
                 continue
 
-            if rsic < 50 or rsic > 75:
+            if rsic and (rsic < 50 or rsic > 75):
                 continue
 
             signals.append(
                 (
                     symbol,
-                    "SCALP_MOMENTUM",
                     tf,
-                    f"⚡ SCALP SIGNAL\n"
+                    f"⚡ <b>SCALP SIGNAL</b>\n\n"
                     f"RSI: {rsic:.1f}\n"
                     f"VOL: {vol_r:.1f}x"
                 )
@@ -411,23 +457,14 @@ def scan_symbol(symbol):
     return signals
 
 # ============================================================
-# MAIN SCAN
+# MAIN
 # ============================================================
-
 
 def scan_all():
 
-    print(f"[{datetime.now()}] SCANNING {MODE} MODE")
+    mode = load_mode()
 
-    if MODE != "SCALP":
-
-        if not btc_market_bullish():
-
-            send_telegram(
-                "⚠️ BTC market bearish. Scan skipped."
-            )
-
-            return
+    print(f"[{datetime.now()}] SCANNING {mode}")
 
     pairs = get_pairs()
 
@@ -446,14 +483,12 @@ def scan_all():
 
     print(f"Signals found: {len(all_signals)}")
 
-    for s in all_signals[:MAX_SIGNALS_PER_SCAN]:
+    for sig in all_signals[:MAX_SIGNALS_PER_SCAN]:
 
-        sym, stype, tf, msg = s
+        symbol, tf, msg = sig
 
         send_telegram(
-            f"🪙 <b>{sym}</b> [{tf}]\n\n"
-            f"{msg}\n\n"
-            f"MODE: {MODE}"
+            f"🪙 <b>{symbol}</b> [{tf}]\n\n{msg}\n\nMODE: {mode}"
         )
 
         time.sleep(1)
@@ -463,5 +498,17 @@ def scan_all():
 # ============================================================
 
 if __name__ == "__main__":
-    scan_all()
-    
+
+    try:
+
+        handle_telegram_commands()
+
+        scan_all()
+
+    except Exception as e:
+
+        print(e)
+
+        send_telegram(
+            f"❌ Bot Error\n{e}"
+          )

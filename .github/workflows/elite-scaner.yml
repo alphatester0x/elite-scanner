@@ -1,0 +1,49 @@
+name: Elite Scanner
+
+on:
+  schedule:
+    # Jalan tiap 4 jam (sesuaikan aja)
+    # - cron: '0 */4 * * *'
+  workflow_dispatch:  # Bisa manual trigger dari GitHub UI
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # ── 1. Checkout repo ─────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Python ──────────────────────────────
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. Install dependencies ──────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Restore state (mode + last_update_id) ─────
+      # Ini yang lo tanyain — cache supaya command & update_id gak reset tiap run
+      - name: Restore scanner state
+        uses: actions/cache@v4
+        with:
+          path: |
+            last_update_id.json
+            mode.json
+          key: scanner-state-${{ github.run_id }}
+          restore-keys: |
+            scanner-state-
+
+      # ── 5. Run scanner ─────────────────────────────────
+      - name: Run Elite Scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python run.py
+
+      # ── 6. Save state back to cache ──────────────────
+      # (actions/cache otomatis save di post-job, jadi step ini gak perlu explicit)
+      

@@ -35,6 +35,16 @@ _stats = {
 }
 
 
+def _fmt(val, fmt=".2f"):
+    """Safe formatter for debug logs."""
+    if val is None:
+        return "None"
+    try:
+        return f"{val:{fmt}}"
+    except Exception:
+        return str(val)
+
+
 def scan_symbol(
     client: BinanceClient,
     symbol: str,
@@ -99,11 +109,10 @@ def scan_symbol(
             _stats["prefilter_fail"] += 1
             logger.debug(
                 f"[{symbol} {tf_label}] REJECTED by prefilter | "
-                f"E50={cache.ema_50:.2f if cache.ema_50 else None} "
-                f"E200={cache.ema_200:.2f if cache.ema_200 else None} "
-                f"RSI={cache.rsi_14:.1f if cache.rsi_14 else None} "
-                f"ADX={cache.adx_14:.1f if cache.adx_14 else None} "
-                f"VOL={cache.vol_r:.1f}x"
+                f"E50={_fmt(cache.ema_50)} E200={_fmt(cache.ema_200)} "
+                f"RSI={_fmt(cache.rsi_14, '.1f')} ADX={_fmt(cache.adx_14, '.1f')} "
+                f"VOL={_fmt(cache.vol_r, '.1f')}x BODY={_fmt(cache.body, '.1f')}% "
+                f"ATR={_fmt(cache.atr_pct, '.1f')}%"
             )
             continue
 

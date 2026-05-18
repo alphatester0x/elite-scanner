@@ -1,4 +1,4 @@
-"""Entry point and scan orchestrator."""
+"""Entry point and scan orchestrator with diagnostics."""
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +22,18 @@ from .telegram_bot import TelegramBot
 
 logger = logging.getLogger(__name__)
 
+# Diagnostic counters (thread-safe via GIL)
+_stats = {
+    "pairs_total": 0,
+    "fetch_ok": 0,
+    "fetch_fail": 0,
+    "prefilter_pass": 0,
+    "prefilter_fail": 0,
+    "score_ok": 0,
+    "score_fail": 0,
+    "signals": 0,
+}
+
 
 def scan_symbol(
     client: BinanceClient,
@@ -41,6 +53,11 @@ def scan_symbol(
         data = client.fetch_klines(symbol, interval)
         if data:
             tf_data[interval] = data
+
+    if not tf_data:
+        _stats["fetch_fail"] += 1
+        return signals
+    _stats["fetch_ok"] += 1
 
     # For SCALP mode, the 1h data acts as HTF — reuse it instead of re-fetching
     htf_data = None
@@ -79,7 +96,18 @@ def scan_symbol(
             passed = prefilter_scalp(cache, htf_cache)
 
         if not passed:
+            _stats["prefilter_fail"] += 1
+            logger.debug(
+                f"[{symbol} {tf_label}] REJECTED by prefilter | "
+                f"E50={cache.ema_50:.2f if cache.ema_50 else None} "
+                f"E200={cache.ema_200:.2f if cache.ema_200 else None} "
+                f"RSI={cache.rsi_14:.1f if cache.rsi_14 else None} "
+                f"ADX={cache.adx_14:.1f if cache.adx_14 else None} "
+                f"VOL={cache.vol_r:.1f}x"
+            )
             continue
+
+        _stats["prefilter_pass"] += 1
 
         # Apply scoring (zero redundant computation)
         try:
@@ -97,8 +125,17 @@ def scan_symbol(
 
         # Score gate
         min_ratio = MIN_SCORE_RATIO.get(mode, 0.60)
-        if max_score == 0 or score / max_score < min_ratio:
+        ratio = score / max_score if max_score > 0 else 0
+        if max_score == 0 or ratio < min_ratio:
+            _stats["score_fail"] += 1
+            logger.debug(
+                f"[{symbol} {tf_label}] REJECTED by score gate | "
+                f"Score={score}/{max_score} ({ratio:.1%}) < {min_ratio:.0%}"
+            )
             continue
+
+        _stats["score_ok"] += 1
+        _stats["signals"] += 1
 
         grade, badge = get_grade(score, max_score)
         emoji = {"ELITE": "🔥", "SWING": "✅", "SCALP": "⚡"}[mode]
@@ -111,6 +148,7 @@ def scan_symbol(
         )
 
         signals.append((score, symbol, tf_label, msg))
+        logger.info(f"[{symbol} {tf_label}] SIGNAL | Score={score}/{max_score} ({ratio:.1%})")
 
     return signals
 
@@ -120,6 +158,10 @@ def scan_all(client: BinanceClient, bot: TelegramBot) -> None:
     mode = load_mode()
     logger.info(f"Starting scan | Mode: {mode} | Time: {datetime.now()}")
 
+    # Reset stats
+    for k in _stats:
+        _stats[k] = 0
+
     try:
         pairs = client.get_active_pairs()
     except Exception as e:
@@ -127,6 +169,7 @@ def scan_all(client: BinanceClient, bot: TelegramBot) -> None:
         bot.send_error_alert(e)
         return
 
+    _stats["pairs_total"] = len(pairs)
     all_signals: List[Tuple[int, str, str, str]] = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -146,6 +189,15 @@ def scan_all(client: BinanceClient, bot: TelegramBot) -> None:
     logger.info(
         f"Scan complete | Signals found: {len(all_signals)} | "
         f"Top {MAX_SIGNALS_PER_SCAN} will be sent"
+    )
+
+    # Diagnostic summary
+    logger.info(
+        f"DIAGNOSTICS | Total pairs: {_stats['pairs_total']} | "
+        f"Fetch OK: {_stats['fetch_ok']} | Fetch Fail: {_stats['fetch_fail']} | "
+        f"Prefilter Pass: {_stats['prefilter_pass']} | Prefilter Fail: {_stats['prefilter_fail']} | "
+        f"Score OK: {_stats['score_ok']} | Score Fail: {_stats['score_fail']} | "
+        f"Final Signals: {_stats['signals']}"
     )
 
     sent_count = 0

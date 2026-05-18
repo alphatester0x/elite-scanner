@@ -3,7 +3,7 @@ name: Elite Scanner
 on:
   schedule:
     # Jalan tiap 4 jam (sesuaikan aja)
-    # - cron: '0 */4 * * *'
+    - cron: '0 */4 * * *'
   workflow_dispatch:  # Bisa manual trigger dari GitHub UI
 
 jobs:

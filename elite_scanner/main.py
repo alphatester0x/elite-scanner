@@ -78,6 +78,11 @@ def scan_symbol(
         if interval not in tf_data:
             continue
 
+        # FIX Bug #2: In SCALP mode, 1h is only used as HTF reference — not scanned for signals.
+        # Scanning 1h as a standalone SCALP signal is incorrect (wrong timeframe for scalping).
+        if mode == "SCALP" and interval == SCALP_HTF_INTERVAL:
+            continue
+
         opens, highs, lows, closes, vols = tf_data[interval]
 
         # Compute all indicators once

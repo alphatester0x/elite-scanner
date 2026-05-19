@@ -101,8 +101,9 @@ def prefilter_scalp(cache: IndicatorCache, htf_cache: Optional[IndicatorCache] =
     htf_cache: IndicatorCache for higher timeframe (1h) data — reused from
     the 1h timeframe fetch, eliminating the N+1 extra HTTP request problem.
     """
-    # EMA cross
-    if not cache.cross_up_9_21:
+    # EMA bullish alignment — fresh cross gives bonus in scoring, not hard-reject here
+    # FIX: cross_up_9_21 hanya True 1 candle dari ratusan → terlalu strict, zero signals
+    if not (cache.ema_9 and cache.ema_21 and cache.ema_9 > cache.ema_21):
         return False
 
     # HTF filter — only when 15m and HTF data available

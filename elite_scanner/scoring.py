@@ -75,8 +75,9 @@ def score_elite(cache: IndicatorCache) -> Tuple[int, int, List[str]]:
         reasons.append("❌ ADX tidak tersedia")
 
     # [2pts] MACD
+    # FIX Bug #3: use `is not None` — macd_line can be 0.0 or negative (falsy but valid)
     max_score += 2
-    if cache.macd_line and cache.signal_line and cache.hist_now is not None and cache.hist_prev is not None:
+    if cache.macd_line is not None and cache.signal_line is not None and cache.hist_now is not None and cache.hist_prev is not None:
         if cache.macd_line > cache.signal_line and cache.hist_now > cache.hist_prev:
             score += 2
             reasons.append(f"✅ MACD Bullish & Histogram Membesar ({cache.hist_now:.6f})")
@@ -243,8 +244,9 @@ def score_scalp(cache: IndicatorCache, htf_cache: Optional[IndicatorCache] = Non
         reasons.append("ℹ️ HTF data tidak tersedia")
 
     # [2pts] MACD
+    # FIX Bug #3: use `is not None` — macd_line can be 0.0 or negative (falsy but valid)
     max_score += 2
-    if cache.macd_line and cache.signal_line and cache.hist_now is not None and cache.hist_prev is not None:
+    if cache.macd_line is not None and cache.signal_line is not None and cache.hist_now is not None and cache.hist_prev is not None:
         if cache.macd_line > cache.signal_line and cache.hist_now > cache.hist_prev:
             score += 2
             reasons.append("✅ MACD Bullish & Accelerating")
@@ -258,7 +260,8 @@ def score_scalp(cache: IndicatorCache, htf_cache: Optional[IndicatorCache] = Non
 
     # [1pt] Stochastic
     max_score += 1
-    if cache.stoch_k and cache.stoch_d:
+    # FIX Bug #4: use `is not None` — stoch_k can be 0.0 (falsy but valid)
+    if cache.stoch_k is not None and cache.stoch_d is not None:
         if 25 <= cache.stoch_k <= 70 and cache.stoch_k > cache.stoch_d:
             score += 1
             reasons.append(f"✅ Stoch %K {cache.stoch_k:.1f} > %D {cache.stoch_d:.1f} (Bullish)")

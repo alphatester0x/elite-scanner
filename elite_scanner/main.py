@@ -119,37 +119,20 @@ def scan_symbol(
     target_10pct = cache.cc * 1.10
     target_50fib = cache.high_24h - (cache.high_24h - cache.low_24h) * 0.5 if cache.high_24h and cache.low_24h else None
 
-    reason_text = "
-".join(reasons)
+    reason_text = "\n".join(reasons)
 
     msg = (
-        f"🪙 <b>{symbol}</b> [{tf_label}]
-
-"
-        f"💥 <b>BOUNCE SIGNAL</b> | {badge} Grade {grade} ({score}/{max_score})
-
-"
-        f"📉 <b>Drop:</b> -{drop:.1f}% dalam 24h
-"
-        f"💰 <b>Current Price:</b> {cache.cc:.6f}
-"
-        f"📊 <b>RSI:</b> {cache.rsi_14:.1f} | <b>Vol:</b> {cache.vol_r:.1f}x avg
-"
-        f"🕯️ <b>Candle:</b> Body +{cache.body:.1f}%, Lower Wick {cache.lower_wick:.1f}%
-
-"
-        f"🎯 <b>Targets:</b>
-"
-        f"   • +10% Rebound: {target_10pct:.6f}
-"
-        f"   • 50% Fibonacci: {target_50fib:.6f if target_50fib else 'N/A'}
-"
-        f"   • 24h High: {cache.high_24h:.6f if cache.high_24h else 'N/A'}
-
-"
-        f"{reason_text}
-
-"
+        f"🪙 <b>{symbol}</b> [{tf_label}]\n\n"
+        f"💥 <b>BOUNCE SIGNAL</b> | {badge} Grade {grade} ({score}/{max_score})\n\n"
+        f"📉 <b>Drop:</b> -{drop:.1f}% dalam 24h\n"
+        f"💰 <b>Current Price:</b> {cache.cc:.6f}\n"
+        f"📊 <b>RSI:</b> {cache.rsi_14:.1f} | <b>Vol:</b> {cache.vol_r:.1f}x avg\n"
+        f"🕯️ <b>Candle:</b> Body +{cache.body:.1f}%, Lower Wick {cache.lower_wick:.1f}%\n\n"
+        f"🎯 <b>Targets:</b>\n"
+        f"   • +10% Rebound: {target_10pct:.6f}\n"
+        f"   • 50% Fibonacci: {target_50fib:.6f if target_50fib else 'N/A'}\n"
+        f"   • 24h High: {cache.high_24h:.6f if cache.high_24h else 'N/A'}\n\n"
+        f"{reason_text}\n\n"
         f"⚠️ <b>Risk:</b> Set stop-loss di bawah {cache.low_24h:.6f if cache.low_24h else 'recent low'}"
     )
 
@@ -203,8 +186,7 @@ def scan_all(client: BinanceClient, bot: TelegramBot) -> None:
     logger.info(f"Found {len(bounce_candidates)} candidates with {MIN_DROP_PCT}-{MAX_DROP_PCT}% drop in 24h")
 
     if not bounce_candidates:
-        bot.send_message(f"📊 <b>BOUNCE Scan Complete</b>
-No tokens found with {MIN_DROP_PCT}-{MAX_DROP_PCT}% drop today.")
+        bot.send_message(f"📊 <b>BOUNCE Scan Complete</b>\nNo tokens found with {MIN_DROP_PCT}-{MAX_DROP_PCT}% drop today.")
         return
 
     all_signals: List[Tuple[int, str, str, str]] = []
@@ -245,16 +227,10 @@ No tokens found with {MIN_DROP_PCT}-{MAX_DROP_PCT}% drop today.")
 
     # Summary message
     summary = (
-        f"📊 <b>BOUNCE Scan Summary</b>
-
-"
-        f"Candidates scanned: {_stats['drop_filtered']}
-"
-        f"Signals found: {_stats['signals']}
-"
-        f"Signals sent: {sent_count}
-
-"
+        f"📊 <b>BOUNCE Scan Summary</b>\n\n"
+        f"Candidates scanned: {_stats['drop_filtered']}\n"
+        f"Signals found: {_stats['signals']}\n"
+        f"Signals sent: {sent_count}\n\n"
         f"Filters: Drop {MIN_DROP_PCT}-{MAX_DROP_PCT}% | 1h timeframe | Min score {MIN_SCORE_RATIO:.0%}"
     )
     bot.send_message(summary)

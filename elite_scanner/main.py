@@ -86,6 +86,16 @@ def scan_symbol(
             f"VolR={_fmt(cache.vol_r, '.1f')}x ATR={_fmt(cache.atr_pct, '.1f')}% "
             f"RedStreak={cache.consecutive_red}"
         )
+
+# Tambahkan di dalam fungsi scan_symbol, setelah prefilter_bounce gagal:
+logger.info(
+    f"[DEBUG {symbol}] Drop={cache.drop_24h_pct:.1f}% | "
+    f"RSI={cache.rsi_14:.1f} | Wick={cache.lower_wick:.1f}% | "
+    f"AboveEMA9={cache.above_ema9} | VolR={cache.vol_r:.1f}x | "
+    f"ATR={cache.atr_pct:.1f}% | RedStreak={cache.consecutive_red} | "
+    f"VolTrend={cache.vol_trend:.1f}x"
+)
+
         return signals
 
     _stats["prefilter_pass"] += 1

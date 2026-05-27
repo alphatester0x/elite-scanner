@@ -13,31 +13,28 @@ MODE_FILE      = "mode.json"
 UPDATE_ID_FILE = "last_update_id.json"
 
 # ── Performance ─────────────────────────────────────────
-MAX_WORKERS          = 10   # Reduced from 30 → Binance IP rate-limit friendly
+MAX_WORKERS          = 10
 MAX_SIGNALS_PER_SCAN = 10
 
 # Filter out illiquid pairs (24h quote volume in USDT)
 MIN_QUOTE_VOLUME_USDT = 500_000
 
-# ── Scoring Thresholds ──────────────────────────────────
-MIN_SCORE_RATIO: Dict[str, float] = {
-    "ELITE": 0.65,
-    "SWING": 0.60,
-    "SCALP": 0.60,
-}
+# ── BOUNCE Mode Config ──────────────────────────────────
+# Window drop range: minimum dan maximum drop dalam 24h
+MIN_DROP_PCT = 20.0   # Minimum drop untuk dianggap "crash"
+MAX_DROP_PCT = 45.0   # Maximum drop: >45% dianggap too risky (possible death spiral)
+
+# Scoring Threshold
+MIN_SCORE_RATIO = 0.60  # Minimum 60% dari max score
 
 # ── Exchange ──────────────────────────────────────────────
 BINANCE_BASE = "https://data-api.binance.vision"
 
-# ── Timeframes per mode ───────────────────────────────────
+# ── Timeframes ────────────────────────────────────────────
+# BOUNCE mode hanya scan di 1h
 TIMEFRAMES = {
-    "ELITE": [("4h", "4H"), ("1d", "1D")],
-    "SWING": [("4h", "4H"), ("1d", "1D")],
-    "SCALP": [("15m", "15M"), ("1h", "1H")],
+    "BOUNCE": [("1h", "1H")],
 }
-
-# HTF used by SCALP mode (must match one of the timeframes above)
-SCALP_HTF_INTERVAL = "1h"
 
 # ── Logging ───────────────────────────────────────────────
 def setup_logging(level: int = logging.INFO) -> None:
@@ -50,13 +47,13 @@ def setup_logging(level: int = logging.INFO) -> None:
 # ── Mode persistence ──────────────────────────────────────
 def load_mode() -> str:
     if not os.path.exists(MODE_FILE):
-        save_mode("ELITE")
+        save_mode("BOUNCE")
     try:
         with open(MODE_FILE, "r") as f:
-            return json.load(f).get("mode", "ELITE")
+            return json.load(f).get("mode", "BOUNCE")
     except Exception:
-        logging.getLogger(__name__).warning("Failed to load mode, defaulting to ELITE")
-        return "ELITE"
+        logging.getLogger(__name__).warning("Failed to load mode, defaulting to BOUNCE")
+        return "BOUNCE"
 
 
 def save_mode(mode: str) -> None:

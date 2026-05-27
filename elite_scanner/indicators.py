@@ -13,7 +13,7 @@ def sma(closes: List[float], n: int) -> Optional[float]:
 
 
 def rsi(closes: List[float], n: int = 14) -> Optional[float]:
-    """RSI with Wilder's Smoothing (industry standard)."""
+    """RSI with Wilder's Smoothing."""
     if len(closes) < n + 2:
         return None
 
@@ -46,7 +46,7 @@ def ema(closes: List[float], n: int) -> Optional[float]:
 
 
 def ema_series(closes: List[float], n: int) -> List[float]:
-    """Full EMA series for crossover detection."""
+    """Full EMA series."""
     if len(closes) < n:
         return []
     k = 2 / (n + 1)
@@ -74,76 +74,22 @@ def atr(highs: List[float], lows: List[float], closes: List[float], n: int = 14)
     return atr_val
 
 
-def adx(highs: List[float], lows: List[float], closes: List[float], n: int = 14) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """ADX with Wilder's Smoothing. Returns (adx, +DI, -DI)."""
-    if len(closes) < n * 2 + 5:
-        return None, None, None
-
-    plus_dm_list  = []
-    minus_dm_list = []
-    tr_list       = []
-
-    for i in range(1, len(closes)):
-        up   = highs[i] - highs[i - 1]
-        down = lows[i - 1] - lows[i]
-        plus_dm_list.append(up if up > down and up > 0 else 0)
-        minus_dm_list.append(down if down > up and down > 0 else 0)
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        )
-        tr_list.append(tr)
-
-    def wilder_smooth(data: List[float], n: int) -> List[float]:
-        result = [sum(data[:n])]
-        for x in data[n:]:
-            result.append(result[-1] - result[-1] / n + x)
-        return result
-
-    sm_tr    = wilder_smooth(tr_list, n)
-    sm_plus  = wilder_smooth(plus_dm_list, n)
-    sm_minus = wilder_smooth(minus_dm_list, n)
-
-    dx_list       = []
-    plus_di_list  = []
-    minus_di_list = []
-
-    for i in range(len(sm_tr)):
-        if sm_tr[i] == 0:
-            continue
-        pdi = 100 * sm_plus[i] / sm_tr[i]
-        mdi = 100 * sm_minus[i] / sm_tr[i]
-        plus_di_list.append(pdi)
-        minus_di_list.append(mdi)
-        dsum = pdi + mdi
-        dx_list.append(100 * abs(pdi - mdi) / dsum if dsum != 0 else 0)
-
-    if len(dx_list) < n:
-        return None, None, None
-
-    adx_val = sum(dx_list[:n]) / n
-    for dx in dx_list[n:]:
-        adx_val = (adx_val * (n - 1) + dx) / n
-
-    return (
-        adx_val,
-        plus_di_list[-1] if plus_di_list else None,
-        minus_di_list[-1] if minus_di_list else None,
-    )
-
-
 def macd(closes: List[float], fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
-    """
-    MACD with full histogram history.
-    Returns (macd_line, signal_line, histogram_now, histogram_prev).
-    histogram_prev is the second-to-last histogram value.
-    """
-    if len(closes) < slow + signal + 1:  # +1 for prev_hist
+    """MACD. Returns (macd_line, signal_line, histogram_now, histogram_prev)."""
+    if len(closes) < slow + signal + 1:
         return None, None, None, None
 
-    ema_fast = ema_series(closes, fast)
-    ema_slow = ema_series(closes, slow)
+    def _ema_series(data: List[float], n: int) -> List[float]:
+        if len(data) < n:
+            return []
+        k = 2 / (n + 1)
+        result = [sum(data[:n]) / n]
+        for x in data[n:]:
+            result.append(x * k + result[-1] * (1 - k))
+        return result
+
+    ema_fast = _ema_series(closes, fast)
+    ema_slow = _ema_series(closes, slow)
 
     diff = len(ema_fast) - len(ema_slow)
     ema_fast = ema_fast[diff:]
@@ -153,17 +99,16 @@ def macd(closes: List[float], fast: int = 12, slow: int = 26, signal: int = 9) -
     if len(macd_line) < signal + 1:
         return None, None, None, None
 
-    signal_line = ema_series(macd_line, signal)
+    signal_line = _ema_series(macd_line, signal)
     diff_len = len(macd_line) - len(signal_line)
     macd_line_trim = macd_line[diff_len:]
-    signal_line_trim = signal_line
 
-    histogram = [m - s for m, s in zip(macd_line_trim, signal_line_trim)]
+    histogram = [m - s for m, s in zip(macd_line_trim, signal_line)]
 
     if len(histogram) < 2:
         return None, None, None, None
 
-    return macd_line_trim[-1], signal_line_trim[-1], histogram[-1], histogram[-2]
+    return macd_line_trim[-1], signal_line[-1], histogram[-1], histogram[-2]
 
 
 def bollinger(closes: List[float], n: int = 20, k: int = 2) -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -177,28 +122,8 @@ def bollinger(closes: List[float], n: int = 20, k: int = 2) -> Tuple[Optional[fl
     return mid + k * std, mid, mid - k * std
 
 
-def stochastic(highs: List[float], lows: List[float], closes: List[float], k: int = 14, d: int = 3) -> Tuple[Optional[float], Optional[float]]:
-    """Stochastic Oscillator. Returns (%K, %D)."""
-    if len(closes) < k + d:
-        return None, None
-    k_vals = []
-    for i in range(k, len(closes) + 1):
-        h = max(highs[i - k:i])
-        l = min(lows[i - k:i])
-        c = closes[i - 1]
-        if (h - l) != 0:
-            k_vals.append(100 * (c - l) / (h - l))
-    if len(k_vals) < d:
-        return None, None
-    d_val = sum(k_vals[-d:]) / d
-    return k_vals[-1], d_val
-
-
 class IndicatorCache:
-    """
-    Pre-computes all indicators once per symbol/timeframe.
-    Eliminates redundant calculations between filter and scoring stages.
-    """
+    """Pre-computes all indicators once per symbol/timeframe."""
 
     def __init__(self, opens: List[float], highs: List[float], lows: List[float], closes: List[float], vols: List[float]):
         self.opens  = opens
@@ -207,49 +132,71 @@ class IndicatorCache:
         self.closes = closes
         self.vols   = vols
 
-        self.cc = closes[-1]
-        self.co = opens[-1]
-        self.cl = lows[-1]
-        self.ch = highs[-1]
-        self.pc = closes[-2] if len(closes) >= 2 else None
+        self.cc = closes[-1]  # current close
+        self.co = opens[-1]   # current open
+        self.cl = lows[-1]    # current low
+        self.ch = highs[-1]   # current high
+        self.pc = closes[-2] if len(closes) >= 2 else None  # previous close
+        self.pco = opens[-2] if len(opens) >= 2 else None   # previous open
+        self.pcl = lows[-2] if len(lows) >= 2 else None     # previous low
+        self.pch = highs[-2] if len(highs) >= 2 else None   # previous high
+
+        # High/Low dalam 24 candle terakhir (untuk BOUNCE: ~24h di timeframe 1h)
+        self.high_24h = max(highs[-24:]) if len(highs) >= 24 else None
+        self.low_24h = min(lows[-24:]) if len(lows) >= 24 else None
 
         self._compute()
 
     def _compute(self) -> None:
         # Moving averages
+        self.sma_20  = sma(self.closes, 20)
         self.sma_50  = sma(self.closes, 50)
         self.sma_200 = sma(self.closes, 200)
-        self.sma_200_prev = sma(self.closes[:-1], 200)
 
         self.ema_9   = ema(self.closes, 9)
         self.ema_21  = ema(self.closes, 21)
         self.ema_50  = ema(self.closes, 50)
-        self.ema_200 = ema(self.closes, 200)
 
         self.ema_series_9  = ema_series(self.closes, 9)
         self.ema_series_21 = ema_series(self.closes, 21)
 
         # Momentum / volatility
         self.rsi_14 = rsi(self.closes, 14)
+        self.rsi_6  = rsi(self.closes, 6)   # Fast RSI untuk bounce detection
         self.atr_14 = atr(self.highs, self.lows, self.closes, 14)
-        self.adx_14, self.plus_di, self.minus_di = adx(self.highs, self.lows, self.closes, 14)
 
-        # MACD with prev_hist (single computation!)
+        # MACD
         self.macd_line, self.signal_line, self.hist_now, self.hist_prev = macd(self.closes, 12, 26, 9)
 
-        # Bands
+        # Bollinger
         self.bb_upper, self.bb_mid, self.bb_lower = bollinger(self.closes, 20, 2)
-
-        # Stochastic
-        self.stoch_k, self.stoch_d = stochastic(self.highs, self.lows, self.closes, 14, 3)
 
         # Derived metrics
         self.body = (self.cc - self.co) / self.co * 100 if self.co != 0 else 0
-        self.avg_vol = sum(self.vols[-21:-1]) / 20 if len(self.vols) > 21 else 0
-        self.vol_r   = self.vols[-1] / self.avg_vol if self.avg_vol > 0 else 0
+        self.prev_body = (self.pc - self.pco) / self.pco * 100 if self.pco and self.pco != 0 else 0
+
+        # Volume
+        self.avg_vol_20 = sum(self.vols[-21:-1]) / 20 if len(self.vols) > 21 else 0
+        self.vol_r = self.vols[-1] / self.avg_vol_20 if self.avg_vol_20 > 0 else 0
+
+        # ATR percentage
         self.atr_pct = (self.atr_14 / self.cc * 100) if self.atr_14 and self.cc else 0
 
-        # Cross detection
+        # Drop calculation: dari high 24h ke current close
+        self.drop_24h_pct = ((self.cc / self.high_24h - 1) * 100) if self.high_24h and self.high_24h > 0 else 0
+
+        # Lower wick (rejection dari bawah)
+        self.lower_wick = (min(self.co, self.cc) - self.cl) / self.cl * 100 if self.cl != 0 else 0
+        self.upper_wick = (self.ch - max(self.co, self.cc)) / self.cc * 100 if self.cc != 0 else 0
+
+        # Previous candle lower wick
+        self.prev_lower_wick = (min(self.pco, self.pc) - self.pcl) / self.pcl * 100 if self.pcl and self.pcl != 0 else 0
+
+        # Price vs EMAs
+        self.above_ema9 = self.cc > self.ema_9 if self.ema_9 else False
+        self.above_ema21 = self.cc > self.ema_21 if self.ema_21 else False
+
+        # EMA cross detection
         self.cross_up_9_21 = False
         if len(self.ema_series_9) >= 2 and len(self.ema_series_21) >= 2:
             self.cross_up_9_21 = (
@@ -257,13 +204,15 @@ class IndicatorCache:
                 and self.ema_series_9[-2] <= self.ema_series_21[-2]
             )
 
-        # Support proximity
-        self.near_ema_21 = False
-        self.near_sma_50 = False
-        if self.ema_21 and self.cc != 0:
-            self.near_ema_21 = abs(self.cc - self.ema_21) / self.ema_21 * 100 < 2.0
-        if self.sma_50 and self.cc != 0:
-            self.near_sma_50 = abs(self.cc - self.sma_50) / self.sma_50 * 100 < 2.0
+        # Consecutive down candles (berapa candle merah berturut-turut sebelum ini)
+        self.consecutive_red = 0
+        for i in range(1, min(len(self.closes), 10)):
+            if self.closes[-i] < self.opens[-i]:
+                self.consecutive_red += 1
+            else:
+                break
 
-        # Lower wick for reversal detection
-        self.lower_wick = (min(self.co, self.cc) - self.cl) / self.cl * 100 if self.cl != 0 else 0
+        # Volume trend (volume 5 candle terakhir vs 20 candle sebelumnya)
+        vol_recent = sum(self.vols[-5:]) / 5 if len(self.vols) >= 5 else 0
+        vol_old = sum(self.vols[-25:-5]) / 20 if len(self.vols) >= 25 else 0
+        self.vol_trend = vol_recent / vol_old if vol_old > 0 else 0

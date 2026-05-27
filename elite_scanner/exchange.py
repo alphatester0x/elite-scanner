@@ -2,7 +2,7 @@
 import requests
 import time
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from functools import wraps
 
 from .config import BINANCE_BASE, MIN_QUOTE_VOLUME_USDT
@@ -46,17 +46,14 @@ class BinanceClient:
         })
         self._pairs: Optional[List[str]] = None
         self._trading_status: Optional[dict] = None
+        self._ticker_24h: Optional[List[Dict[str, Any]]] = None
 
     @retry_on_error(max_retries=3, backoff=1.0)
     def get_active_pairs(self) -> List[str]:
-        """
-        Fetch USDT pairs filtered by minimum 24h volume AND trading status.
-        Uses /api/v3/ticker/24hr for volume + /api/v3/exchangeInfo for status.
-        """
+        """Fetch USDT pairs filtered by minimum 24h volume AND trading status."""
         if self._pairs is not None:
             return self._pairs
 
-        # Step 1: Get trading status from exchangeInfo
         logger.info("Fetching exchange info for trading status...")
         resp_info = self.session.get(f"{BINANCE_BASE}/api/v3/exchangeInfo", timeout=20)
         resp_info.raise_for_status()
@@ -67,9 +64,8 @@ class BinanceClient:
             if s.get("status") == "TRADING":
                 trading_symbols.add(s["symbol"])
 
-        logger.info(f"Found {len(trading_symbols)} TRADING symbols from exchangeInfo")
+        logger.info(f"Found {len(trading_symbols)} TRADING symbols")
 
-        # Step 2: Get 24h volume from ticker
         logger.info(f"Fetching 24h ticker data (min vol: {MIN_QUOTE_VOLUME_USDT:,} USDT)...")
         resp_ticker = self.session.get(f"{BINANCE_BASE}/api/v3/ticker/24hr", timeout=30)
         resp_ticker.raise_for_status()
@@ -92,11 +88,19 @@ class BinanceClient:
         return pairs
 
     @retry_on_error(max_retries=3, backoff=1.0)
+    def get_24h_ticker(self) -> List[Dict[str, Any]]:
+        """Fetch raw 24h ticker data for all symbols."""
+        if self._ticker_24h is not None:
+            return self._ticker_24h
+
+        resp = self.session.get(f"{BINANCE_BASE}/api/v3/ticker/24hr", timeout=30)
+        resp.raise_for_status()
+        self._ticker_24h = resp.json()
+        return self._ticker_24h
+
+    @retry_on_error(max_retries=3, backoff=1.0)
     def fetch_klines(self, symbol: str, interval: str, limit: int = 300) -> Optional[Tuple[List[float], List[float], List[float], List[float], List[float]]]:
-        """
-        Fetch OHLCV klines from Binance.
-        Returns (opens, highs, lows, closes, volumes) or None on failure/insufficient data.
-        """
+        """Fetch OHLCV klines from Binance."""
         try:
             resp = self.session.get(
                 f"{BINANCE_BASE}/api/v3/klines",
@@ -106,7 +110,7 @@ class BinanceClient:
             resp.raise_for_status()
             raw = resp.json()
 
-            if not isinstance(raw, list) or len(raw) < 220:
+            if not isinstance(raw, list) or len(raw) < 50:  # BOUNCE butuh minimum 50 candle
                 logger.debug(
                     f"{symbol} [{interval}]: insufficient data "
                     f"({len(raw) if isinstance(raw, list) else 'N/A'} candles)"

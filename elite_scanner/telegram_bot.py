@@ -45,10 +45,7 @@ class TelegramBot:
             return False
 
     def handle_commands(self) -> None:
-        """
-        Poll Telegram for commands.
-        Uses update_id file for persistent offset tracking.
-        """
+        """Poll Telegram for commands."""
         if not self.token or not self.chat_id:
             return
 
@@ -74,24 +71,15 @@ class TelegramBot:
                 text = msg.get("text", "").lower().strip()
                 chat_id = str(msg.get("chat", {}).get("id", ""))
 
-                # Always persist last_id so we never replay
                 save_last_update_id(uid)
 
                 if chat_id != self.chat_id:
                     continue
 
-                if text == "/elite":
-                    save_mode("ELITE")
-                    self.send_message("🔥 Mode diubah ke ELITE")
-                    logger.info("Mode changed to ELITE via Telegram")
-                elif text == "/swing":
-                    save_mode("SWING")
-                    self.send_message("✅ Mode diubah ke SWING")
-                    logger.info("Mode changed to SWING via Telegram")
-                elif text == "/scalp":
-                    save_mode("SCALP")
-                    self.send_message("⚡ Mode diubah ke SCALP")
-                    logger.info("Mode changed to SCALP via Telegram")
+                if text == "/bounce":
+                    save_mode("BOUNCE")
+                    self.send_message("💥 Mode diubah ke BOUNCE (Mean Reversion)")
+                    logger.info("Mode changed to BOUNCE via Telegram")
                 elif text == "/status":
                     mode = load_mode()
                     self.send_message(f"📊 Current mode: <b>{mode}</b>")

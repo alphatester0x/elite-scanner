@@ -1,32 +1,36 @@
-"""Entry point and scan orchestrator with diagnostics."""
+"""Entry point and scan orchestrator for BOUNCE mode."""
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from .config import (
     setup_logging,
     load_mode,
     TIMEFRAMES,
-    SCALP_HTF_INTERVAL,
     MAX_WORKERS,
     MAX_SIGNALS_PER_SCAN,
     MIN_SCORE_RATIO,
+    MIN_DROP_PCT,
+    MAX_DROP_PCT,
 )
 from .exchange import BinanceClient
 from .indicators import IndicatorCache
-from .filters import prefilter_elite, prefilter_swing, prefilter_scalp
-from .scoring import score_elite, score_swing, score_scalp, get_grade
+from .filters import prefilter_bounce
+from .scoring import score_bounce, get_grade
 from .telegram_bot import TelegramBot
 
 logger = logging.getLogger(__name__)
 
-# Diagnostic counters (thread-safe via GIL)
+# Diagnostic counters
 _stats = {
     "pairs_total": 0,
-    "fetch_ok": 0,
-    "fetch_fail": 0,
+    "fetch_ticker_ok": 0,
+    "fetch_ticker_fail": 0,
+    "drop_filtered": 0,
+    "fetch_klines_ok": 0,
+    "fetch_klines_fail": 0,
     "prefilter_pass": 0,
     "prefilter_fail": 0,
     "score_ok": 0,
@@ -36,7 +40,6 @@ _stats = {
 
 
 def _fmt(val, fmt=".2f"):
-    """Safe formatter for debug logs."""
     if val is None:
         return "None"
     try:
@@ -48,146 +51,151 @@ def _fmt(val, fmt=".2f"):
 def scan_symbol(
     client: BinanceClient,
     symbol: str,
-    mode: str,
+    drop_24h: float,
 ) -> List[Tuple[int, str, str, str]]:
-    """
-    Scan a single symbol across all timeframes for the current mode.
-    Returns a list of (score, symbol, tf_label, message).
+    """Scan a single symbol for BOUNCE signals.
+
+    Returns list of (score, symbol, tf_label, message).
     """
     signals = []
-    timeframes = TIMEFRAMES.get(mode, [])
 
-    # Pre-fetch all timeframe data for this symbol
-    tf_data = {}
-    for interval, tf_label in timeframes:
-        data = client.fetch_klines(symbol, interval)
-        if data:
-            tf_data[interval] = data
+    # BOUNCE mode hanya 1h
+    interval, tf_label = TIMEFRAMES["BOUNCE"][0]
 
-    if not tf_data:
-        _stats["fetch_fail"] += 1
+    data = client.fetch_klines(symbol, interval, limit=300)
+    if not data:
+        _stats["fetch_klines_fail"] += 1
         return signals
-    _stats["fetch_ok"] += 1
+    _stats["fetch_klines_ok"] += 1
 
-    # For SCALP mode, the 1h data acts as HTF — reuse it instead of re-fetching
-    htf_data = None
-    if mode == "SCALP" and SCALP_HTF_INTERVAL in tf_data:
-        htf_data = tf_data[SCALP_HTF_INTERVAL]
+    opens, highs, lows, closes, vols = data
 
-    for interval, tf_label in timeframes:
-        if interval not in tf_data:
-            continue
+    try:
+        cache = IndicatorCache(opens, highs, lows, closes, vols)
+    except Exception as e:
+        logger.warning(f"Indicator computation failed for {symbol}: {e}")
+        return signals
 
-        # FIX Bug #2: In SCALP mode, 1h is only used as HTF reference — not scanned for signals.
-        # Scanning 1h as a standalone SCALP signal is incorrect (wrong timeframe for scalping).
-        if mode == "SCALP" and interval == SCALP_HTF_INTERVAL:
-            continue
-
-        opens, highs, lows, closes, vols = tf_data[interval]
-
-        # Compute all indicators once
-        try:
-            cache = IndicatorCache(opens, highs, lows, closes, vols)
-        except Exception as e:
-            logger.warning(f"Indicator computation failed for {symbol} [{interval}]: {e}")
-            continue
-
-        # Prepare HTF cache for SCALP (reuse pre-fetched 1h data)
-        htf_cache = None
-        if mode == "SCALP" and interval == "15m" and htf_data is not None:
-            try:
-                h_opens, h_highs, h_lows, h_closes, h_vols = htf_data
-                htf_cache = IndicatorCache(h_opens, h_highs, h_lows, h_closes, h_vols)
-            except Exception as e:
-                logger.warning(f"HTF indicator computation failed for {symbol}: {e}")
-
-        # Apply hard filters (fast reject)
-        passed = False
-        if mode == "ELITE":
-            passed = prefilter_elite(cache)
-        elif mode == "SWING":
-            passed = prefilter_swing(cache)
-        elif mode == "SCALP":
-            passed = prefilter_scalp(cache, htf_cache)
-
-        if not passed:
-            _stats["prefilter_fail"] += 1
-            logger.debug(
-                f"[{symbol} {tf_label}] REJECTED by prefilter | "
-                f"E50={_fmt(cache.ema_50)} E200={_fmt(cache.ema_200)} "
-                f"RSI={_fmt(cache.rsi_14, '.1f')} ADX={_fmt(cache.adx_14, '.1f')} "
-                f"VOL={_fmt(cache.vol_r, '.1f')}x BODY={_fmt(cache.body, '.1f')}% "
-                f"ATR={_fmt(cache.atr_pct, '.1f')}%"
-            )
-            continue
-
-        _stats["prefilter_pass"] += 1
-
-        # Apply scoring (zero redundant computation)
-        try:
-            if mode == "ELITE":
-                score, max_score, reasons = score_elite(cache)
-            elif mode == "SWING":
-                score, max_score, reasons = score_swing(cache)
-            elif mode == "SCALP":
-                score, max_score, reasons = score_scalp(cache, htf_cache)
-            else:
-                continue
-        except Exception as e:
-            logger.error(f"Scoring error for {symbol} [{interval}]: {e}")
-            continue
-
-        # Score gate
-        min_ratio = MIN_SCORE_RATIO.get(mode, 0.60)
-        ratio = score / max_score if max_score > 0 else 0
-        if max_score == 0 or ratio < min_ratio:
-            _stats["score_fail"] += 1
-            logger.debug(
-                f"[{symbol} {tf_label}] REJECTED by score gate | "
-                f"Score={score}/{max_score} ({ratio:.1%}) < {min_ratio:.0%}"
-            )
-            continue
-
-        _stats["score_ok"] += 1
-        _stats["signals"] += 1
-
-        grade, badge = get_grade(score, max_score)
-        emoji = {"ELITE": "🔥", "SWING": "✅", "SCALP": "⚡"}[mode]
-        reason_text = "\n".join(reasons)
-
-        msg = (
-            f"{emoji} <b>{mode} SIGNAL</b> | {badge} Grade {grade} ({score}/{max_score})\n\n"
-            f"{reason_text}\n\n"
-            f"MODE: {mode}"
+    # Apply hard filters
+    if not prefilter_bounce(cache, drop_24h=drop_24h):
+        _stats["prefilter_fail"] += 1
+        logger.debug(
+            f"[{symbol} {tf_label}] REJECTED | "
+            f"Drop={_fmt(cache.drop_24h_pct)}% RSI={_fmt(cache.rsi_14, '.1f')} "
+            f"Wick={_fmt(cache.lower_wick, '.1f')}% AboveEMA9={cache.above_ema9} "
+            f"VolR={_fmt(cache.vol_r, '.1f')}x ATR={_fmt(cache.atr_pct, '.1f')}% "
+            f"RedStreak={cache.consecutive_red}"
         )
+        return signals
 
-        signals.append((score, symbol, tf_label, msg))
-        logger.info(f"[{symbol} {tf_label}] SIGNAL | Score={score}/{max_score} ({ratio:.1%})")
+    _stats["prefilter_pass"] += 1
+
+    # Apply scoring
+    try:
+        score, max_score, reasons = score_bounce(cache)
+    except Exception as e:
+        logger.error(f"Scoring error for {symbol}: {e}")
+        return signals
+
+    # Score gate
+    ratio = score / max_score if max_score > 0 else 0
+    if max_score == 0 or ratio < MIN_SCORE_RATIO:
+        _stats["score_fail"] += 1
+        logger.debug(
+            f"[{symbol} {tf_label}] SCORE REJECTED | "
+            f"Score={score}/{max_score} ({ratio:.1%}) < {MIN_SCORE_RATIO:.0%}"
+        )
+        return signals
+
+    _stats["score_ok"] += 1
+    _stats["signals"] += 1
+
+    grade, badge = get_grade(score, max_score)
+
+    # Target rebound calculation
+    drop = abs(cache.drop_24h_pct) if cache.drop_24h_pct else 0
+    target_10pct = cache.cc * 1.10
+    target_50fib = cache.high_24h - (cache.high_24h - cache.low_24h) * 0.5 if cache.high_24h and cache.low_24h else None
+
+    reason_text = "\n".join(reasons)
+
+    msg = (
+        f"🪙 <b>{symbol}</b> [{tf_label}]\n\n"
+        f"💥 <b>BOUNCE SIGNAL</b> | {badge} Grade {grade} ({score}/{max_score})\n\n"
+        f"📉 <b>Drop:</b> -{drop:.1f}% dalam 24h\n"
+        f"💰 <b>Current Price:</b> {cache.cc:.6f}\n"
+        f"📊 <b>RSI:</b> {cache.rsi_14:.1f} | <b>Vol:</b> {cache.vol_r:.1f}x avg\n"
+        f"🕯️ <b>Candle:</b> Body +{cache.body:.1f}%, Lower Wick {cache.lower_wick:.1f}%\n\n"
+        f"🎯 <b>Targets:</b>\n"
+        f"   • +10% Rebound: {target_10pct:.6f}\n"
+        f"   • 50% Fibonacci: {target_50fib:.6f if target_50fib else 'N/A'}\n"
+        f"   • 24h High: {cache.high_24h:.6f if cache.high_24h else 'N/A'}\n\n"
+        f"{reason_text}\n\n"
+        f"⚠️ <b>Risk:</b> Set stop-loss di bawah {cache.low_24h:.6f if cache.low_24h else 'recent low'}"
+    )
+
+    signals.append((score, symbol, tf_label, msg))
+    logger.info(f"[{symbol} {tf_label}] SIGNAL | Score={score}/{max_score} ({ratio:.1%}) | Drop=-{drop:.1f}%")
 
     return signals
 
 
 def scan_all(client: BinanceClient, bot: TelegramBot) -> None:
-    """Main scanning orchestrator."""
+    """Main scanning orchestrator for BOUNCE mode."""
     mode = load_mode()
-    logger.info(f"Starting scan | Mode: {mode} | Time: {datetime.now()}")
+    logger.info(f"Starting BOUNCE scan | Time: {datetime.now()}")
 
     # Reset stats
     for k in _stats:
         _stats[k] = 0
 
+    # Step 1: Fetch 24h ticker data untuk filter drop
     try:
-        pairs = client.get_active_pairs()
+        ticker_data = client.get_24h_ticker()
+        _stats["fetch_ticker_ok"] = 1
     except Exception as e:
-        logger.critical(f"Failed to fetch pairs: {e}")
+        logger.critical(f"Failed to fetch 24h ticker: {e}")
         bot.send_error_alert(e)
         return
 
-    _stats["pairs_total"] = len(pairs)
+    # Step 2: Filter token yang drop 20-45% dan masih liquid
+    bounce_candidates = []
+    for item in ticker_data:
+        symbol = item.get("symbol", "")
+        if not symbol.endswith("USDT"):
+            continue
+
+        quote_vol = float(item.get("quoteVolume", 0))
+        if quote_vol < 500_000:  # MIN_QUOTE_VOLUME_USDT
+            continue
+
+        # Hitung price change percentage
+        price_change_pct = float(item.get("priceChangePercent", 0))
+
+        # Kita cari yang drop (negative change)
+        if price_change_pct > -MIN_DROP_PCT:  # Drop kurang dari 20%
+            continue
+        if price_change_pct < -MAX_DROP_PCT:  # Drop lebih dari 45%
+            continue
+
+        bounce_candidates.append((symbol, price_change_pct))
+
+    _stats["pairs_total"] = len(bounce_candidates)
+    _stats["drop_filtered"] = len(bounce_candidates)
+
+    logger.info(f"Found {len(bounce_candidates)} candidates with {MIN_DROP_PCT}-{MAX_DROP_PCT}% drop in 24h")
+
+    if not bounce_candidates:
+        bot.send_message(f"📊 <b>BOUNCE Scan Complete</b>\nNo tokens found with {MIN_DROP_PCT}-{MAX_DROP_PCT}% drop today.")
+        return
+
     all_signals: List[Tuple[int, str, str, str]] = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(scan_symbol, client, p, mode): p for p in pairs}
+        futures = {
+            executor.submit(scan_symbol, client, symbol, drop_pct): symbol 
+            for symbol, drop_pct in bounce_candidates
+        }
 
         for future in as_completed(futures):
             symbol = futures[future]
@@ -197,31 +205,35 @@ def scan_all(client: BinanceClient, bot: TelegramBot) -> None:
             except Exception as e:
                 logger.error(f"Scan failed for {symbol}: {e}")
 
-    # Prioritize by score descending
+    # Sort by score descending
     all_signals.sort(key=lambda x: x[0], reverse=True)
 
     logger.info(
-        f"Scan complete | Signals found: {len(all_signals)} | "
-        f"Top {MAX_SIGNALS_PER_SCAN} will be sent"
-    )
-
-    # Diagnostic summary
-    logger.info(
-        f"DIAGNOSTICS | Total pairs: {_stats['pairs_total']} | "
-        f"Fetch OK: {_stats['fetch_ok']} | Fetch Fail: {_stats['fetch_fail']} | "
-        f"Prefilter Pass: {_stats['prefilter_pass']} | Prefilter Fail: {_stats['prefilter_fail']} | "
-        f"Score OK: {_stats['score_ok']} | Score Fail: {_stats['score_fail']} | "
+        f"Scan complete | Candidates: {_stats['drop_filtered']} | "
+        f"Klines OK: {_stats['fetch_klines_ok']} | "
+        f"Prefilter Pass: {_stats['prefilter_pass']} | "
+        f"Score OK: {_stats['score_ok']} | "
         f"Final Signals: {_stats['signals']}"
     )
 
+    # Send signals
     sent_count = 0
     for score, symbol, tf_label, msg in all_signals[:MAX_SIGNALS_PER_SCAN]:
-        full_msg = f"🪙 <b>{symbol}</b> [{tf_label}]\n\n{msg}"
-        if bot.send_message(full_msg):
+        if bot.send_message(msg):
             sent_count += 1
-            time.sleep(1)  # Respect Telegram rate limits
+            time.sleep(1)
         else:
             logger.warning(f"Failed to send signal for {symbol}")
+
+    # Summary message
+    summary = (
+        f"📊 <b>BOUNCE Scan Summary</b>\n\n"
+        f"Candidates scanned: {_stats['drop_filtered']}\n"
+        f"Signals found: {_stats['signals']}\n"
+        f"Signals sent: {sent_count}\n\n"
+        f"Filters: Drop {MIN_DROP_PCT}-{MAX_DROP_PCT}% | 1h timeframe | Min score {MIN_SCORE_RATIO:.0%}"
+    )
+    bot.send_message(summary)
 
     logger.info(f"Sent {sent_count}/{min(len(all_signals), MAX_SIGNALS_PER_SCAN)} signals")
 

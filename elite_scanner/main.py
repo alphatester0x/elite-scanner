@@ -53,27 +53,32 @@ def scan_symbol(
     symbol: str,
     drop_24h: float,
 ) -> List[Tuple[int, str, str, str]]:
-    """Scan a single symbol for BOUNCE signals."""
+    """Scan a single symbol for BOUNCE signals.
+
+    Returns list of (score, symbol, tf_label, message).
+    """
     signals = []
+
+    # BOUNCE mode hanya 1h
     interval, tf_label = TIMEFRAMES["BOUNCE"][0]
-    
+
     # DEBUG: Start scan
     logger.info(f"[DEBUG {symbol}] Starting scan | Drop24h={drop_24h:.1f}%")
 
     data = client.fetch_klines(symbol, interval, limit=300)
     if not data:
         _stats["fetch_klines_fail"] += 1
-        logger.info(f"[DEBUG {symbol}] FETCH FAILED: No klines data")  # <-- TAMBAH INI
+        logger.info(f"[DEBUG {symbol}] FETCH FAILED: No klines data")
         return signals
     _stats["fetch_klines_ok"] += 1
-    logger.info(f"[DEBUG {symbol}] FETCH OK: {len(data[0])} candles")  # <-- TAMBAH INI
-    
+    logger.info(f"[DEBUG {symbol}] FETCH OK: {len(data[0])} candles")
+
     opens, highs, lows, closes, vols = data
-    
+
     try:
         cache = IndicatorCache(opens, highs, lows, closes, vols)
         logger.info(
-            f"[DEBUG {symbol}] CACHE OK: "
+            f"[DEBUG {symbol}] CACHE OK | "
             f"Drop={_fmt(cache.drop_24h_pct)}% | "
             f"RSI={_fmt(cache.rsi_14, '.1f')} | "
             f"Wick={_fmt(cache.lower_wick, '.1f')}% | "
@@ -84,42 +89,35 @@ def scan_symbol(
             f"VolTrend={_fmt(cache.vol_trend, '.1f')}x"
         )
     except Exception as e:
-        logger.warning(f"[DEBUG {symbol}] CACHE FAILED: {e}")  # <-- TAMBAH INI
+        logger.warning(f"[DEBUG {symbol}] CACHE FAILED: {e}")
         return signals
 
     # Apply hard filters
     if not prefilter_bounce(cache, drop_24h=drop_24h):
         _stats["prefilter_fail"] += 1
-        logger.info(f"[DEBUG {symbol}] PREFILTER REJECTED")  # <-- TAMBAH INI
+        logger.info(f"[DEBUG {symbol}] PREFILTER REJECTED")
         return signals
-    
+
     _stats["prefilter_pass"] += 1
-    logger.info(f"[DEBUG {symbol}] PREFILTER PASSED")  # <-- TAMBAH INI
-    
+    logger.info(f"[DEBUG {symbol}] PREFILTER PASSED")
+
     # Apply scoring
     try:
         score, max_score, reasons = score_bounce(cache)
     except Exception as e:
         logger.error(f"[DEBUG {symbol}] SCORING ERROR: {e}")
         return signals
-    
+
     # Score gate
     ratio = score / max_score if max_score > 0 else 0
     if max_score == 0 or ratio < MIN_SCORE_RATIO:
         _stats["score_fail"] += 1
         logger.info(f"[DEBUG {symbol}] SCORE REJECTED: {score}/{max_score} ({ratio:.1%})")
         return signals
-    
+
     _stats["score_ok"] += 1
     _stats["signals"] += 1
     logger.info(f"[DEBUG {symbol}] SIGNAL GENERATED: {score}/{max_score}")
-
-    # ... (sisanya sama, msg building dll)
-
-        return signals
-
-    _stats["score_ok"] += 1
-    _stats["signals"] += 1
 
     grade, badge = get_grade(score, max_score)
 

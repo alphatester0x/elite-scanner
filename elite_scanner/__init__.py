@@ -1,1 +1,1 @@
-"""Elite Scanner - Optimized Crypto Signal Bot"""
+"""Bounce Scanner - Oversold Bounce Signal Bot"""

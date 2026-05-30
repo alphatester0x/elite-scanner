@@ -1,19 +1,18 @@
-"""Entry point and scan orchestrator for BOUNCE mode."""
+"""Bounce scanner — scan orchestrator."""
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 
 from .config import (
     setup_logging,
-    load_mode,
-    TIMEFRAMES,
+    SCAN_INTERVAL,
+    CANDLES_LIMIT,
+    DROP_LOOKBACK_CANDLES,
     MAX_WORKERS,
     MAX_SIGNALS_PER_SCAN,
     MIN_SCORE_RATIO,
-    MIN_DROP_PCT,
-    MAX_DROP_PCT,
 )
 from .exchange import BinanceClient
 from .indicators import IndicatorCache
@@ -25,21 +24,15 @@ logger = logging.getLogger(__name__)
 
 # Diagnostic counters
 _stats = {
-    "pairs_total": 0,
-    "fetch_ticker_ok": 0,
-    "fetch_ticker_fail": 0,
-    "drop_filtered": 0,
-    "fetch_klines_ok": 0,
-    "fetch_klines_fail": 0,
+    "pairs_total":    0,
+    "fetch_ok":       0,
+    "fetch_fail":     0,
     "prefilter_pass": 0,
     "prefilter_fail": 0,
-    "score_ok": 0,
-    "score_fail": 0,
-    "signals": 0,
+    "score_ok":       0,
+    "score_fail":     0,
+    "signals":        0,
 }
-
-# Store debug info per symbol for Telegram reporting
-_debug_log: Dict[str, str] = {}
 
 
 def _fmt(val, fmt=".2f"):
@@ -54,182 +47,104 @@ def _fmt(val, fmt=".2f"):
 def scan_symbol(
     client: BinanceClient,
     symbol: str,
-    drop_24h: float,
-) -> List[Tuple[int, str, str, str]]:
-    """Scan a single symbol for BOUNCE signals.
-
-    Returns list of (score, symbol, tf_label, message).
+) -> List[Tuple[int, str, str]]:
+    """
+    Scan a single symbol for a bounce setup.
+    Returns list of (score, symbol, message).
     """
     signals = []
 
-    # BOUNCE mode hanya 1h
-    interval, tf_label = TIMEFRAMES["BOUNCE"][0]
-
-    # DEBUG: Start scan
-    logger.info(f"[DEBUG {symbol}] Starting scan | Drop24h={drop_24h:.1f}%")
-
-    data = client.fetch_klines(symbol, interval, limit=300)
+    data = client.fetch_klines(symbol, SCAN_INTERVAL, limit=CANDLES_LIMIT)
     if not data:
-        _stats["fetch_klines_fail"] += 1
-        reason = "FETCH FAILED"
-        _debug_log[symbol] = reason
-        logger.info(f"[DEBUG {symbol}] {reason}")
+        _stats["fetch_fail"] += 1
         return signals
-    _stats["fetch_klines_ok"] += 1
-    logger.info(f"[DEBUG {symbol}] FETCH OK: {len(data[0])} candles")
+    _stats["fetch_ok"] += 1
 
     opens, highs, lows, closes, vols = data
 
     try:
-        cache = IndicatorCache(opens, highs, lows, closes, vols)
-        logger.info(
-            f"[DEBUG {symbol}] CACHE OK | "
-            f"Drop={_fmt(cache.drop_24h_pct)}% | "
-            f"RSI={_fmt(cache.rsi_14, '.1f')} | "
-            f"Wick={_fmt(cache.lower_wick, '.1f')}% | "
-            f"AboveEMA9={cache.above_ema9} | "
-            f"VolR={_fmt(cache.vol_r, '.1f')}x | "
-            f"ATR={_fmt(cache.atr_pct, '.1f')}% | "
-            f"RedStreak={cache.consecutive_red} | "
-            f"VolTrend={_fmt(cache.vol_trend, '.1f')}x"
+        cache = IndicatorCache(
+            opens, highs, lows, closes, vols,
+            lookback=DROP_LOOKBACK_CANDLES,
         )
     except Exception as e:
-        reason = f"CACHE FAILED: {e}"
-        _debug_log[symbol] = reason
-        logger.warning(f"[DEBUG {symbol}] {reason}")
+        logger.warning(f"Indicator computation failed for {symbol}: {e}")
         return signals
 
-    # Apply hard filters
-    if not prefilter_bounce(cache, drop_24h=drop_24h):
+    # Hard filter
+    passed, reject_reason = prefilter_bounce(cache)
+    if not passed:
         _stats["prefilter_fail"] += 1
-        reason = (
-            f"PREFILTER REJECTED | "
-            f"RSI={_fmt(cache.rsi_14, '.1f')} | "
-            f"Wick={_fmt(cache.lower_wick, '.1f')}% | "
-            f"AboveEMA9={cache.above_ema9} | "
-            f"VolR={_fmt(cache.vol_r, '.1f')}x | "
-            f"ATR={_fmt(cache.atr_pct, '.1f')}% | "
-            f"Red={cache.consecutive_red} | "
-            f"VolTrend={_fmt(cache.vol_trend, '.1f')}x"
-        )
-        _debug_log[symbol] = reason
-        logger.info(f"[DEBUG {symbol}] {reason}")
+        logger.debug(f"[{symbol}] REJECTED | {reject_reason}")
         return signals
 
     _stats["prefilter_pass"] += 1
-    logger.info(f"[DEBUG {symbol}] PREFILTER PASSED")
 
-    # Apply scoring
+    # Scoring
     try:
         score, max_score, reasons = score_bounce(cache)
     except Exception as e:
-        reason = f"SCORING ERROR: {e}"
-        _debug_log[symbol] = reason
-        logger.error(f"[DEBUG {symbol}] {reason}")
+        logger.error(f"Scoring error for {symbol}: {e}")
         return signals
 
-    # Score gate
     ratio = score / max_score if max_score > 0 else 0
     if max_score == 0 or ratio < MIN_SCORE_RATIO:
         _stats["score_fail"] += 1
-        reason = f"SCORE REJECTED: {score}/{max_score} ({ratio:.1%})"
-        _debug_log[symbol] = reason
-        logger.info(f"[DEBUG {symbol}] {reason}")
+        logger.debug(
+            f"[{symbol}] SCORE GATE FAIL | "
+            f"Score={score}/{max_score} ({ratio:.1%}) < {MIN_SCORE_RATIO:.0%}"
+        )
         return signals
 
     _stats["score_ok"] += 1
     _stats["signals"] += 1
-    _debug_log[symbol] = f"SIGNAL: {score}/{max_score}"
-    logger.info(f"[DEBUG {symbol}] SIGNAL GENERATED: {score}/{max_score}")
 
     grade, badge = get_grade(score, max_score)
+    reason_text  = "\n".join(reasons)
 
-    # Target rebound calculation
-    drop = abs(cache.drop_24h_pct) if cache.drop_24h_pct else 0
-    target_10pct = cache.cc * 1.10
-    target_50fib = cache.high_24h - (cache.high_24h - cache.low_24h) * 0.5 if cache.high_24h and cache.low_24h else None
-
-    reason_text = "\n".join(reasons)
-
+    # Build Telegram message
     msg = (
-        f"🪙 <b>{symbol}</b> [{tf_label}]\n\n"
-        f"💥 <b>BOUNCE SIGNAL</b> | {badge} Grade {grade} ({score}/{max_score})\n\n"
-        f"📉 <b>Drop:</b> -{drop:.1f}% dalam 24h\n"
-        f"💰 <b>Current Price:</b> {cache.cc:.6f}\n"
-        f"📊 <b>RSI:</b> {cache.rsi_14:.1f} | <b>Vol:</b> {cache.vol_r:.1f}x avg\n"
-        f"🕯️ <b>Candle:</b> Body +{cache.body:.1f}%, Lower Wick {cache.lower_wick:.1f}%\n\n"
-        f"🎯 <b>Targets:</b>\n"
-        f"   • +10% Rebound: {target_10pct:.6f}\n"
-        f"   • 50% Fibonacci: {target_50fib:.6f if target_50fib else 'N/A'}\n"
-        f"   • 24h High: {cache.high_24h:.6f if cache.high_24h else 'N/A'}\n\n"
-        f"{reason_text}\n\n"
-        f"⚠️ <b>Risk:</b> Set stop-loss di bawah {cache.low_24h:.6f if cache.low_24h else 'recent low'}"
+        f"🪙 <b>{symbol}</b> [1H]\n\n"
+        f"🔄 <b>BOUNCE SIGNAL</b> | {badge} Grade {grade} ({score}/{max_score})\n\n"
+        f"📉 Drop dari 24h High: <b>{cache.drop_pct:.1f}%</b>\n"
+        f"💰 Harga sekarang: <b>{cache.cc:.6g}</b>\n"
+        f"📊 RSI: <b>{_fmt(cache.rsi_14, '.1f')}</b> | "
+        f"Stoch %K: <b>{_fmt(cache.stoch_k, '.1f')}</b>\n"
+        f"📈 ATR: <b>{cache.atr_pct:.2f}%</b> | "
+        f"Vol: <b>{cache.vol_r:.1f}x</b>\n\n"
+        f"<b>Analisa:</b>\n{reason_text}\n\n"
+        f"⚠️ <i>BUKAN financial advice. DYOR, pasang SL.</i>"
     )
 
-    signals.append((score, symbol, tf_label, msg))
-    logger.info(f"[{symbol} {tf_label}] SIGNAL | Score={score}/{max_score} ({ratio:.1%}) | Drop=-{drop:.1f}%")
+    signals.append((score, symbol, msg))
+    logger.info(
+        f"[{symbol}] SIGNAL | "
+        f"Drop={cache.drop_pct:.1f}% | RSI={_fmt(cache.rsi_14, '.1f')} | "
+        f"Score={score}/{max_score} ({ratio:.1%}) | Grade={grade}"
+    )
 
     return signals
 
 
 def scan_all(client: BinanceClient, bot: TelegramBot) -> None:
-    """Main scanning orchestrator for BOUNCE mode."""
-    global _debug_log
-    _debug_log = {}  # Reset debug log
-
-    mode = load_mode()
+    """Main scanning orchestrator."""
     logger.info(f"Starting BOUNCE scan | Time: {datetime.now()}")
 
-    # Reset stats
     for k in _stats:
         _stats[k] = 0
 
-    # Step 1: Fetch 24h ticker data untuk filter drop
     try:
-        ticker_data = client.get_24h_ticker()
-        _stats["fetch_ticker_ok"] = 1
+        pairs = client.get_active_pairs()
     except Exception as e:
-        logger.critical(f"Failed to fetch 24h ticker: {e}")
+        logger.critical(f"Failed to fetch pairs: {e}")
         bot.send_error_alert(e)
         return
 
-    # Step 2: Filter token yang drop 20-45% dan masih liquid
-    bounce_candidates = []
-    for item in ticker_data:
-        symbol = item.get("symbol", "")
-        if not symbol.endswith("USDT"):
-            continue
-
-        quote_vol = float(item.get("quoteVolume", 0))
-        if quote_vol < 500_000:
-            continue
-
-        price_change_pct = float(item.get("priceChangePercent", 0))
-
-        if price_change_pct > -MIN_DROP_PCT:
-            continue
-        if price_change_pct < -MAX_DROP_PCT:
-            continue
-
-        bounce_candidates.append((symbol, price_change_pct))
-
-    _stats["pairs_total"] = len(bounce_candidates)
-    _stats["drop_filtered"] = len(bounce_candidates)
-
-    logger.info(f"Found {len(bounce_candidates)} candidates with {MIN_DROP_PCT}-{MAX_DROP_PCT}% drop in 24h")
-
-    if not bounce_candidates:
-        bot.send_message(f"📊 <b>BOUNCE Scan Complete</b>\nNo tokens found with {MIN_DROP_PCT}-{MAX_DROP_PCT}% drop today.")
-        return
-
-    all_signals: List[Tuple[int, str, str, str]] = []
+    _stats["pairs_total"] = len(pairs)
+    all_signals: List[Tuple[int, str, str]] = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {
-            executor.submit(scan_symbol, client, symbol, drop_pct): symbol 
-            for symbol, drop_pct in bounce_candidates
-        }
-
+        futures = {executor.submit(scan_symbol, client, p): p for p in pairs}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
@@ -237,70 +152,49 @@ def scan_all(client: BinanceClient, bot: TelegramBot) -> None:
                 all_signals.extend(result)
             except Exception as e:
                 logger.error(f"Scan failed for {symbol}: {e}")
-                _debug_log[symbol] = f"THREAD ERROR: {e}"
 
     # Sort by score descending
     all_signals.sort(key=lambda x: x[0], reverse=True)
 
     logger.info(
-        f"Scan complete | Candidates: {_stats['drop_filtered']} | "
-        f"Klines OK: {_stats['fetch_klines_ok']} | "
-        f"Prefilter Pass: {_stats['prefilter_pass']} | "
+        f"Scan complete | "
+        f"Pairs: {_stats['pairs_total']} | "
+        f"Fetch OK: {_stats['fetch_ok']} | "
+        f"Pre-filter pass: {_stats['prefilter_pass']} | "
         f"Score OK: {_stats['score_ok']} | "
-        f"Final Signals: {_stats['signals']}"
+        f"Signals: {len(all_signals)}"
     )
 
-    # Send signals
-    sent_count = 0
-    for score, symbol, tf_label, msg in all_signals[:MAX_SIGNALS_PER_SCAN]:
+    if not all_signals:
+        logger.info("No bounce candidates found this scan.")
+        return
+
+    sent = 0
+    for score, symbol, msg in all_signals[:MAX_SIGNALS_PER_SCAN]:
         if bot.send_message(msg):
-            sent_count += 1
+            sent += 1
             time.sleep(1)
         else:
             logger.warning(f"Failed to send signal for {symbol}")
 
-    # Build debug summary for Telegram
-    debug_lines = []
-    for symbol, drop_pct in bounce_candidates:
-        status = _debug_log.get(symbol, "UNKNOWN")
-        debug_lines.append(f"<code>{symbol}</code>: {status}")
-
-    debug_summary = "\n".join(debug_lines[:20])  # Max 20 lines to avoid Telegram msg too long
-
-    # Summary message
-    if _stats["signals"] == 0:
-        # No signals: send debug breakdown
-        summary = (
-            f"📊 <b>BOUNCE Scan Summary</b>\n\n"
-            f"Candidates: {_stats['drop_filtered']}\n"
-            f"Signals: 0\n\n"
-            f"<b>Debug Breakdown:</b>\n"
-            f"{debug_summary}\n\n"
-            f"Filters: Drop {MIN_DROP_PCT}-{MAX_DROP_PCT}% | 1h | Min score {MIN_SCORE_RATIO:.0%}"
-        )
-    else:
-        summary = (
-            f"📊 <b>BOUNCE Scan Summary</b>\n\n"
-            f"Candidates: {_stats['drop_filtered']}\n"
-            f"Signals found: {_stats['signals']}\n"
-            f"Signals sent: {sent_count}\n\n"
-            f"Filters: Drop {MIN_DROP_PCT}-{MAX_DROP_PCT}% | 1h | Min score {MIN_SCORE_RATIO:.0%}"
-        )
-
-    bot.send_message(summary)
-    logger.info(f"Sent {sent_count}/{min(len(all_signals), MAX_SIGNALS_PER_SCAN)} signals")
+    logger.info(f"Sent {sent}/{min(len(all_signals), MAX_SIGNALS_PER_SCAN)} signals")
 
 
 def main() -> None:
     setup_logging()
     client = BinanceClient()
-    bot = TelegramBot()
+    bot    = TelegramBot()
+
+    # Validate env vars early — fail fast instead of running full scan then dying
+    if not bot.token or not bot.chat_id:
+        logger.critical("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set. Exiting.")
+        return
 
     try:
         bot.handle_commands()
         scan_all(client, bot)
     except Exception as e:
-        logger.critical(f"Fatal error in main loop: {e}", exc_info=True)
+        logger.critical(f"Fatal error: {e}", exc_info=True)
         bot.send_error_alert(e)
 
 

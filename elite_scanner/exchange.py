@@ -70,28 +70,22 @@ class BinanceClient:
         logger.info(f"Found {len(trading_status)} active USDT trading pairs")
         return trading_status
 
-    @retry_on_error(max_retries=3, backoff=1.0)
     def get_active_pairs(self) -> List[str]:
-        """Fetch USDT pairs filtered by minimum 24h volume AND trading status."""
+        """Return USDT pairs filtered by minimum 24h volume AND trading status.
+
+        Reuses cached ticker data from get_24h_ticker() to avoid a duplicate API call.
+        """
         if self._pairs is not None:
             return self._pairs
 
-        trading_symbols = self._get_trading_symbols()
+        # Reuse cached ticker; fetch if not yet available
+        ticker_data = self._ticker_24h if self._ticker_24h is not None else self.get_24h_ticker()
 
-        logger.info(f"Fetching 24h ticker data (min vol: {MIN_QUOTE_VOLUME_USDT:,} USDT)...")
-        resp_ticker = self.session.get(f"{BINANCE_BASE}/api/v3/ticker/24hr", timeout=30)
-        resp_ticker.raise_for_status()
-        ticker_data = resp_ticker.json()
-
-        pairs = []
-        for s in ticker_data:
-            symbol = s.get("symbol", "")
-            if symbol not in trading_symbols:
-                continue
-            quote_vol = float(s.get("quoteVolume", 0))
-            if quote_vol < MIN_QUOTE_VOLUME_USDT:
-                continue
-            pairs.append(symbol)
+        pairs = [
+            item["symbol"]
+            for item in ticker_data
+            if float(item.get("quoteVolume", 0)) >= MIN_QUOTE_VOLUME_USDT
+        ]
 
         self._pairs = pairs
         logger.info(f"Selected {len(pairs)} liquid active USDT pairs")
@@ -124,30 +118,26 @@ class BinanceClient:
     @retry_on_error(max_retries=3, backoff=1.0)
     def fetch_klines(self, symbol: str, interval: str, limit: int = 300) -> Optional[Tuple[List[float], List[float], List[float], List[float], List[float]]]:
         """Fetch OHLCV klines from Binance."""
-        try:
-            resp = self.session.get(
-                f"{BINANCE_BASE}/api/v3/klines",
-                params={"symbol": symbol, "interval": interval, "limit": limit},
-                timeout=10,
+        resp = self.session.get(
+            f"{BINANCE_BASE}/api/v3/klines",
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+
+        # Insufficient data is not a retryable error — return None immediately
+        if not isinstance(raw, list) or len(raw) < 50:
+            logger.debug(
+                f"{symbol} [{interval}]: insufficient data "
+                f"({len(raw) if isinstance(raw, list) else 'N/A'} candles)"
             )
-            resp.raise_for_status()
-            raw = resp.json()
-
-            if not isinstance(raw, list) or len(raw) < 50:
-                logger.debug(
-                    f"{symbol} [{interval}]: insufficient data "
-                    f"({len(raw) if isinstance(raw, list) else 'N/A'} candles)"
-                )
-                return None
-
-            opens    = [float(c[1]) for c in raw]
-            highs    = [float(c[2]) for c in raw]
-            lows     = [float(c[3]) for c in raw]
-            closes   = [float(c[4]) for c in raw]
-            volumes  = [float(c[5]) for c in raw]
-
-            return opens, highs, lows, closes, volumes
-
-        except Exception as e:
-            logger.warning(f"Fetch error for {symbol} [{interval}]: {e}")
             return None
+
+        opens   = [float(c[1]) for c in raw]
+        highs   = [float(c[2]) for c in raw]
+        lows    = [float(c[3]) for c in raw]
+        closes  = [float(c[4]) for c in raw]
+        volumes = [float(c[5]) for c in raw]
+
+        return opens, highs, lows, closes, volumes

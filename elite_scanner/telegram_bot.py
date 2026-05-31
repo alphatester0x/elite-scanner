@@ -44,6 +44,26 @@ class TelegramBot:
             logger.error(f"Failed to send Telegram message: {e}")
             return False
 
+    def send_document_text(self, content: str, filename: str, caption: str = "") -> bool:
+        """Send a plain-text file as a document attachment."""
+        if not self.token or not self.chat_id:
+            logger.warning("Telegram credentials not configured")
+            return False
+
+        url = f"{self.base_url}/sendDocument"
+        try:
+            resp = self.session.post(
+                url,
+                data={"chat_id": self.chat_id, "caption": caption},
+                files={"document": (filename, content.encode("utf-8"), "text/plain")},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send Telegram document: {e}")
+            return False
+
     def handle_commands(self) -> None:
         """Poll Telegram for commands."""
         if not self.token or not self.chat_id:

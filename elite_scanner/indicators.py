@@ -125,12 +125,13 @@ def bollinger(closes: List[float], n: int = 20, k: int = 2) -> Tuple[Optional[fl
 class IndicatorCache:
     """Pre-computes all indicators once per symbol/timeframe."""
 
-    def __init__(self, opens: List[float], highs: List[float], lows: List[float], closes: List[float], vols: List[float]):
+    def __init__(self, opens: List[float], highs: List[float], lows: List[float], closes: List[float], vols: List[float], drop_24h: Optional[float] = None):
         self.opens  = opens
         self.highs  = highs
         self.lows   = lows
         self.closes = closes
         self.vols   = vols
+        self._drop_24h_ticker = drop_24h  # from 24h ticker, takes precedence over klines-derived
 
         self.cc = closes[-1]  # current close
         self.co = opens[-1]   # current open
@@ -182,8 +183,11 @@ class IndicatorCache:
         # ATR percentage
         self.atr_pct = (self.atr_14 / self.cc * 100) if self.atr_14 and self.cc else 0
 
-        # Drop calculation: dari high 24h ke current close
-        self.drop_24h_pct = ((self.cc / self.high_24h - 1) * 100) if self.high_24h and self.high_24h > 0 else 0
+        # Drop calculation: gunakan drop_24h dari ticker (konsisten dengan filter awal)
+        # cache.drop_24h_pct dari klines bisa beda metodologi; ticker lebih akurat
+        self.drop_24h_pct = self._drop_24h_ticker if self._drop_24h_ticker is not None else (
+            ((self.cc / self.high_24h - 1) * 100) if self.high_24h and self.high_24h > 0 else 0
+        )
 
         # Lower wick (rejection dari bawah)
         self.lower_wick = (min(self.co, self.cc) - self.cl) / self.cl * 100 if self.cl != 0 else 0
@@ -205,8 +209,9 @@ class IndicatorCache:
             )
 
         # Consecutive down candles (berapa candle merah berturut-turut sebelum ini)
+        # Start from i=2 to skip the current (still-forming) candle
         self.consecutive_red = 0
-        for i in range(1, min(len(self.closes), 10)):
+        for i in range(2, min(len(self.closes), 11)):
             if self.closes[-i] < self.opens[-i]:
                 self.consecutive_red += 1
             else:

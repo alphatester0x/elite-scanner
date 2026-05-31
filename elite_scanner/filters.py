@@ -1,55 +1,69 @@
-"""Hard pre-filters for bounce detection.
+"""Hard pre-filters for BOUNCE mode.
 
-Fast-reject layer — eliminates symbols before expensive scoring.
-A symbol that passes all filters here is a candidate for bounce entry.
+BOUNCE strategy: mean reversion pada token yang crash 20-45% dalam 24h.
+Filter memastikan token masih "hidup" dan menunjukkan tanda reversal.
 """
 import logging
+from typing import Optional
 from .indicators import IndicatorCache
-from .config import (
-    MIN_DROP_PCT,
-    RSI_MAX,
-    VOL_RATIO_MIN,
-    BB_LOWER_BUFFER,
-    MAX_BEAR_BODY_PCT,
-)
+from .config import MIN_DROP_PCT, MAX_DROP_PCT
 
 logger = logging.getLogger(__name__)
 
 
-def prefilter_bounce(cache: IndicatorCache) -> tuple[bool, str]:
+def prefilter_bounce(cache: IndicatorCache, drop_24h: Optional[float] = None) -> bool:
+    """Hard filters for BOUNCE (mean reversion) mode.
+
+    Args:
+        cache: IndicatorCache dari timeframe 1h
+        drop_24h: Drop percentage dari 24h ticker (fallback kalau cache tidak tersedia)
+
+    Returns:
+        True jika token lolos semua filter hard
     """
-    Hard filters for BOUNCE mode.
-    Returns (passed: bool, reject_reason: str).
-    reject_reason is empty string if passed.
-    """
+    # ── Filter 1: Drop dalam range yang aman ──────────────────────────────
+    # Drop harus signifikan tapi tidak terlalu ekstrem (death spiral)
+    drop = cache.drop_24h_pct if cache.drop_24h_pct is not None else (drop_24h or 0)
 
-    # 1. MUST have dropped >= MIN_DROP_PCT from the 24h high
-    #    This is the core condition of the entire strategy.
-    if cache.drop_pct > -MIN_DROP_PCT:
-        return False, f"drop={cache.drop_pct:.1f}% < -{MIN_DROP_PCT}%"
+    if drop > -MIN_DROP_PCT:  # Drop kurang dari 20% (misal -15%)
+        return False
+    if drop < -MAX_DROP_PCT:  # Drop lebih dari 45% (too risky)
+        return False
 
-    # 2. RSI must be in oversold territory — confirms price exhaustion
-    if cache.rsi_14 is None or cache.rsi_14 > RSI_MAX:
-        rsi_str = f"{cache.rsi_14:.1f}" if cache.rsi_14 is not None else "None"
-        return False, f"RSI={rsi_str} > {RSI_MAX} (not oversold)"
+    # ── Filter 2: Masih ada liquidity ────────────────────────────────────
+    if cache.vol_r < 1.0:
+        return False
 
-    # 3. Volume confirmation — the drop must have happened on real selling
-    #    pressure, not just thin air. Protects against slow bleeds.
-    if cache.drop_vol_r < VOL_RATIO_MIN:
-        return False, f"drop_vol_r={cache.drop_vol_r:.2f}x < {VOL_RATIO_MIN}x"
+    # ── Filter 3: RSI oversold tapi tidak dead ───────────────────────────
+    # RSI < 35 = oversold (bounce potential)
+    # RSI < 15 = dead token (avoid)
+    if cache.rsi_14 is None:
+        return False
+    if cache.rsi_14 > 40:  # Belum oversold
+        return False
+    if cache.rsi_14 < 10:  # Token sudah mati
+        return False
 
-    # 4. Price near lower Bollinger Band — confirms extreme overextension
-    if cache.bb_lower_dist_pct is None or cache.bb_lower_dist_pct > BB_LOWER_BUFFER * 100:
-        dist_str = f"{cache.bb_lower_dist_pct:.1f}%" if cache.bb_lower_dist_pct is not None else "None"
-        return False, f"bb_lower_dist={dist_str} > {BB_LOWER_BUFFER*100:.0f}% (too far from lower BB)"
+    # ── Filter 4: Candle structure menunjukkan rejection ────────────────
+    # Lower wick > 1% = buyer stepping in
+    if cache.lower_wick < 1.0:
+        return False
 
-    # 5. Latest candle not still crashing hard
-    #    A massive red body on the latest candle means the dump is not done.
-    if cache.body < MAX_BEAR_BODY_PCT:
-        return False, f"body={cache.body:.1f}% < {MAX_BEAR_BODY_PCT}% (still crashing)"
+    # ── Filter 5: Price sudah di atas EMA9 (micro momentum bullish) ──────
+    # Ini menandakan reversal sudah mulai, bukan masih free fall
+    if not cache.above_ema9:
+        return False
 
-    # 6. ATR sanity — must have some volatility (avoid dead coins)
-    if cache.atr_pct < 0.5:
-        return False, f"atr_pct={cache.atr_pct:.2f}% < 0.5% (no volatility)"
+    # ── Filter 6: Volatilitas masih ada ──────────────────────────────────
+    if cache.atr_pct < 1.5:
+        return False
 
-    return True, ""
+    # ── Filter 7: Bukan death spiral (consecutive red < 8) ───────────────
+    if cache.consecutive_red >= 8:
+        return False
+
+    # ── Filter 8: Volume trend tidak collapsing ──────────────────────────
+    if cache.vol_trend < 0.5:
+        return False
+
+    return True

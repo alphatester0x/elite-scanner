@@ -25,7 +25,7 @@ MIN_DROP_PCT = 20.0   # Minimum drop untuk dianggap "crash"
 MAX_DROP_PCT = 45.0   # Maximum drop: >45% dianggap too risky (possible death spiral)
 
 # Scoring Threshold
-MIN_SCORE_RATIO = 0.40  # Minimum 60% dari max score
+MIN_SCORE_RATIO = 0.20  # relaxed for more signals  # Minimum 60% dari max score
 
 # ── Exchange ──────────────────────────────────────────────
 BINANCE_BASE = "https://data-api.binance.vision"

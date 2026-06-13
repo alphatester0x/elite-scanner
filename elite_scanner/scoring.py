@@ -111,6 +111,11 @@ def score_bounce(cache: IndicatorCache) -> Tuple[int, int, List[str]]:
         reasons.append("⚠️ Price Above EMA9 Only (Early Reversal)")
     else:
         reasons.append("❌ Price Below EMA9 (Still Weak)")
+    # Extra point: price above EMA50 as additional bullish confirmation
+    if cache.above_ema50:
+        score += 1
+        reasons.append("✅ Price Also Above EMA50 (Strong Trend)")
+
 
     # ── [1pt] EMA Cross ──────────────────────────────────────────────────
     max_score += 1

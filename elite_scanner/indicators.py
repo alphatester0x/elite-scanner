@@ -199,6 +199,8 @@ class IndicatorCache:
         # Price vs EMAs
         self.above_ema9 = self.cc > self.ema_9 if self.ema_9 else False
         self.above_ema21 = self.cc > self.ema_21 if self.ema_21 else False
+        # Additional flag for EMA 50 (used in scoring)
+        self.above_ema50 = self.cc > self.ema_50 if self.ema_50 else False
 
         # EMA cross detection
         self.cross_up_9_21 = False

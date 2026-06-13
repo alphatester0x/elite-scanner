@@ -24,7 +24,7 @@ def prefilter_bounce(cache: IndicatorCache, drop_24h: Optional[float] = None) ->
 
     # ── Filter 2: Masih ada liquidity ────────────────────────────────────
     # Dilonggarkan: 0.3x cukup (volume bisa memang rendah saat dump selesai)
-    if cache.vol_r < 0.3:
+    if cache.vol_r < 0.2:
         return False
 
     # ── Filter 3: RSI oversold ────────────────────────────────────────────
@@ -48,7 +48,7 @@ def prefilter_bounce(cache: IndicatorCache, drop_24h: Optional[float] = None) ->
 
     # ── Filter 6: Volatilitas masih ada ──────────────────────────────────
     # Dilonggarkan: 1.0% (dari 1.5%)
-    if cache.atr_pct < 1.0:
+    if cache.atr_pct < 1.5:
         return False
 
     # ── Filter 7: Bukan death spiral ─────────────────────────────────────
@@ -58,7 +58,7 @@ def prefilter_bounce(cache: IndicatorCache, drop_24h: Optional[float] = None) ->
 
     # ── Filter 8: Volume trend tidak collapsing total ─────────────────────
     # Dilonggarkan: 0.3x (dari 0.5x) — volume wajar drop setelah big dump
-    if cache.vol_trend < 0.3:
+    if cache.vol_trend < 0.2:
         return False
 
     return True
